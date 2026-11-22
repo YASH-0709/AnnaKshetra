@@ -1,0 +1,6 @@
+{
+  "summary":  "Comprehensive architectural and product implementation plan for AnnaKshetra, a real-time surplus food redistribution platform tailored for the Bengaluru tech corridor. Covers the 45-second donor posting flow, smart geospatial matching, WebSocket-backed real-time pickup coordination with OTP verification, food safety guardrails, and a CSR Sponsor ROI calculator with transparent impact assumptions.",
+  "updatedAt":  "2026-11-21T18:58:15.818307922Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}
