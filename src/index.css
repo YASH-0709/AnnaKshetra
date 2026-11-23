@@ -52,3 +52,11 @@
   background: transparent !important;
   border: none !important;
 }
+
+.volunteer-marker {
+  background: transparent;
+  border: none;
+  font-size: 28px;
+  text-align: center;
+  line-height: 35px;
+}

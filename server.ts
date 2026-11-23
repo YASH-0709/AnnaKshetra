@@ -4,7 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { WebSocket, WebSocketServer } from 'ws';
-import {
+import type {
   Coordinates,
   DeliveryLocationRecord,
   DietaryType,
@@ -24,11 +24,23 @@ import {
   mapFoodStateToStorage,
   normalizeQuantityToKgAndServings,
 } from './src/utils/matching.ts';
+import {
+  getLiveLocationByDeliveryId,
+  getLocationHistoryByDeliveryId,
+  updateDeliveryLocationStatus,
+  upsertLiveLocation,
+} from './src/db/liveLocations.ts';
+import { getOrCreateUser } from './src/db/users.ts';
+import {
+  optionalAuth,
+  requireAuth,
+  type AuthRequest,
+} from './src/middleware/auth.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 const findHub = (id: string): Coordinates => {
   return (
@@ -973,6 +985,19 @@ async function startServer() {
         if (message.type === 'volunteer:location-update' && message.data) {
           const result = updateVolunteerDeliveryLocation(message.data);
           if (result.listing && result.record) {
+            if (process.env.SQL_HOST) {
+              upsertLiveLocation({
+                deliveryId: result.record.delivery_id,
+                volunteerId: result.record.volunteer_id,
+                latitude: result.record.latitude,
+                longitude: result.record.longitude,
+                accuracyMeters: result.record.accuracy_meters ?? null,
+                speedKmh: result.record.speed_kmh ?? null,
+                deliveryStatus: result.record.delivery_status,
+              }).catch((dbErr) => {
+                console.error('Non-fatal live location persist error:', dbErr);
+              });
+            }
             broadcastState('volunteer:location-updated', {
               deliveryId: result.listing.id,
               locationRecord: result.record,
@@ -1040,6 +1065,22 @@ async function startServer() {
 
   // --- REST API Endpoints ---
 
+  // 0. Authenticated Firebase User Profile Sync
+  app.get('/api/auth/me', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const uid = req.user!.uid;
+      const email = req.user!.email || `${uid}@annakshetra.app`;
+      const displayName = req.user!.name || null;
+      const dbUser = process.env.SQL_HOST
+        ? await getOrCreateUser(uid, email, displayName)
+        : { uid, email, displayName, role: 'donor' };
+      res.json({ user: dbUser });
+    } catch (error) {
+      console.error('Error in /api/auth/me:', error);
+      res.status(500).json({ error: 'Unable to synchronize authenticated profile.' });
+    }
+  });
+
   // 1. Get authoritative state
   app.get('/api/state', (_req, res) => {
     res.json({
@@ -1051,18 +1092,145 @@ async function startServer() {
     });
   });
 
+  // 1a. Cloud SQL-backed live delivery location endpoints (delivery-scoped authorization)
+  app.get('/api/live-locations/:deliveryId', optionalAuth, async (req: AuthRequest, res) => {
+    try {
+      const listing = listings.find((l) => l.id === req.params.deliveryId);
+      if (!listing) {
+        res.status(404).json({ error: 'Delivery not found.' });
+        return;
+      }
+
+      const requesterId = String(req.query.userId || '');
+      const isParticipant =
+        requesterId === listing.donorId ||
+        requesterId === listing.claimedByReceiverId ||
+        requesterId === listing.assignedVolunteerId ||
+        users.some((u) => u.id === requesterId && u.role === 'sponsor');
+
+      if (!isParticipant && !req.user) {
+        res.status(403).json({
+          error:
+            'Forbidden: Only the assigned donor, volunteer, or claiming receiver can access this delivery location.',
+        });
+        return;
+      }
+
+      let persisted = null;
+      let history: Array<{ latitude: number; longitude: number; recordedAt: Date | string }> = [];
+
+      if (process.env.SQL_HOST) {
+        try {
+          persisted = await getLiveLocationByDeliveryId(listing.id);
+          history = await getLocationHistoryByDeliveryId(listing.id, 60);
+        } catch (dbErr) {
+          console.error('Fallback to live listing coordinates:', dbErr);
+        }
+      }
+
+      const location = persisted
+        ? {
+            delivery_id: persisted.deliveryId,
+            volunteer_id: persisted.volunteerId,
+            latitude: persisted.latitude,
+            longitude: persisted.longitude,
+            accuracy_meters: persisted.accuracyMeters ?? undefined,
+            speed_kmh: persisted.speedKmh ?? undefined,
+            updated_at:
+              persisted.updatedAt instanceof Date
+                ? persisted.updatedAt.toISOString()
+                : String(persisted.updatedAt),
+            delivery_status: persisted.deliveryStatus,
+          }
+        : {
+            delivery_id: listing.id,
+            volunteer_id: listing.assignedVolunteerId || 'unassigned',
+            latitude: listing.currentLocation.lat,
+            longitude: listing.currentLocation.lng,
+            accuracy_meters: listing.currentLocation.accuracyMeters,
+            speed_kmh: listing.currentLocation.speedKmh,
+            updated_at:
+              listing.currentLocation.lastGpsUpdatedAt || listing.createdAt,
+            delivery_status: listing.status,
+          };
+
+      res.json({ location, history });
+    } catch (error) {
+      console.error('Error in GET /api/live-locations/:deliveryId:', error);
+      res.status(500).json({ error: 'Failed to retrieve live delivery location.' });
+    }
+  });
+
+  app.put('/api/live-locations/:deliveryId', optionalAuth, async (req: AuthRequest, res) => {
+    try {
+      const result = updateVolunteerDeliveryLocation({
+        ...req.body,
+        delivery_id: req.params.deliveryId,
+      });
+
+      if (result.error || !result.listing || !result.record) {
+        res.status(result.status || 400).json({
+          error: result.error || 'Unable to update delivery location.',
+        });
+        return;
+      }
+
+      if (process.env.SQL_HOST) {
+        try {
+          await upsertLiveLocation({
+            deliveryId: result.record.delivery_id,
+            volunteerId: result.record.volunteer_id,
+            volunteerUid: req.user?.uid || null,
+            latitude: result.record.latitude,
+            longitude: result.record.longitude,
+            accuracyMeters: result.record.accuracy_meters ?? null,
+            speedKmh: result.record.speed_kmh ?? null,
+            deliveryStatus: result.record.delivery_status,
+          });
+        } catch (dbErr) {
+          console.error('Cloud SQL upsert warning:', dbErr);
+        }
+      }
+
+      broadcastState('volunteer:location-updated', {
+        deliveryId: result.listing.id,
+        locationRecord: result.record,
+      });
+      res.json({ listing: result.listing, location: result.record });
+    } catch (error) {
+      console.error('Error in PUT /api/live-locations/:deliveryId:', error);
+      res.status(500).json({ error: 'Failed to save live delivery location.' });
+    }
+  });
+
   // 1b. Update live volunteer GPS coordinates via REST fallback
-  app.post('/api/listings/:id/live-location', (req, res) => {
+  app.post('/api/listings/:id/live-location', optionalAuth, async (req: AuthRequest, res) => {
     const result = updateVolunteerDeliveryLocation({
       ...req.body,
       delivery_id: req.params.id,
     });
-    if (result.error) {
+    if (result.error || !result.listing || !result.record) {
       res.status(result.status || 400).json({ error: result.error });
       return;
     }
+    if (process.env.SQL_HOST) {
+      try {
+        await upsertLiveLocation({
+          deliveryId: result.record.delivery_id,
+          volunteerId: result.record.volunteer_id,
+          volunteerUid: req.user?.uid || null,
+          latitude: result.record.latitude,
+          longitude: result.record.longitude,
+          accuracyMeters: result.record.accuracy_meters ?? null,
+          speedKmh: result.record.speed_kmh ?? null,
+          deliveryStatus: result.record.delivery_status,
+        });
+      } catch (dbErr) {
+        console.error('Cloud SQL upsert warning:', dbErr);
+      }
+    }
     broadcastState('volunteer:location-updated', {
-      deliveryId: result.listing!.id,
+      deliveryId: result.listing.id,
       locationRecord: result.record,
     });
     res.json({ listing: result.listing, locationRecord: result.record });
@@ -1558,6 +1726,12 @@ async function startServer() {
         createdAt: new Date().toISOString(),
         readByUserIds: [],
       });
+
+      if (process.env.SQL_HOST) {
+        updateDeliveryLocationStatus(listing.id, 'DELIVERED').catch((dbErr) => {
+          console.error('Non-fatal delivery status sync warning:', dbErr);
+        });
+      }
 
       broadcastState('listing:delivered', { listingId: listing.id });
       res.json({ listing });

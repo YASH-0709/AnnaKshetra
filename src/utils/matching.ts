@@ -1,4 +1,4 @@
-import {
+import type {
   Coordinates,
   FoodListing,
   FoodThermalState,
@@ -8,7 +8,7 @@ import {
   QuantityUnit,
   StorageCondition,
   UserProfile,
-} from '../types';
+} from '../types.ts';
 
 /**
  * All-India Major Food Rescue Hubs & Neighborhood Corridors

@@ -3,6 +3,8 @@ import {
   Bell,
   CheckCircle2,
   KeyRound,
+  LogIn,
+  LogOut,
   Moon,
   Navigation,
   QrCode,
@@ -13,10 +15,12 @@ import {
 import { AuthRoleModal } from './components/AuthRoleModal';
 import { CorridorMap } from './components/CorridorMap';
 import { ImpactBusinessView } from './components/ImpactBusinessView';
+import LiveTrackingMap from './components/LiveTrackingMap';
 import { LiveTrackingTransparencyInfo } from './components/LiveTrackingTransparencyInfo';
 import { MySurplusHistoryView } from './components/MySurplusHistoryView';
 import { QrScannerOverlay } from './components/QrScannerOverlay';
 import { RapidDonorModal } from './components/RapidDonorModal';
+import { useAuth } from './contexts/AuthContext';
 import { useLiveTracking } from './hooks/useLiveTracking';
 import {
   Coordinates,
@@ -45,7 +49,7 @@ export default function App() {
   const [listings, setListings] = useState<FoodListing[]>([]);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [currentUserId, setCurrentUserId] = useState<string>('user-donor-1');
-  const [selectedListingId, setSelectedListingId] = useState<string>('lst-101');
+  const [selectedListingId, setSelectedListingId] = useState<string>('lst-102');
   const [activeSection, setActiveSection] = useState<ActiveSection>('dispatch');
 
   // Theme state synced with document.documentElement
@@ -76,7 +80,12 @@ export default function App() {
   const [loadingInitial, setLoadingInitial] = useState<boolean>(true);
   const [liveMapSyncEnabled, setLiveMapSyncEnabled] = useState<boolean>(true);
   const [forceSyncTrigger, setForceSyncTrigger] = useState<number>(0);
+  const [mapViewMode, setMapViewMode] = useState<'corridor' | 'live-osrm'>(
+    'live-osrm'
+  );
 
+  const { firebaseUser, idToken, signInWithGoogle, signOut, authError } =
+    useAuth();
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -554,6 +563,39 @@ export default function App() {
                     View My Surplus History &amp; Savings →
                   </button>
                 )}
+
+                {/* Real Google Sign-In Session */}
+                <div className="mt-2.5 pt-2.5 border-t border-slate-200 dark:border-slate-700">
+                  {firebaseUser ? (
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      <span className="truncate text-slate-600 dark:text-slate-300 font-medium">
+                        {firebaseUser.displayName || firebaseUser.email}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={signOut}
+                        className="inline-flex items-center gap-1 text-slate-500 hover:text-slate-900 dark:hover:text-white font-semibold cursor-pointer shrink-0"
+                      >
+                        <LogOut className="w-3 h-3" />
+                        Sign out
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={signInWithGoogle}
+                      className="w-full py-1.5 px-2.5 text-xs font-semibold rounded-lg bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 hover:border-orange-500 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <LogIn className="w-3.5 h-3.5 text-orange-600" />
+                      Sign in with Google
+                    </button>
+                  )}
+                  {authError && (
+                    <p className="text-[11px] text-red-600 dark:text-red-400 mt-1">
+                      {authError}
+                    </p>
+                  )}
+                </div>
               </div>
 
               {/* Instant 1-Click Role Switcher Buttons for Rapid Evaluation */}
@@ -741,22 +783,95 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Interactive All-India Leaflet Street Map & Live Rider GPS Tracker */}
-              <CorridorMap
-                listings={listings}
-                selectedListing={selectedListing}
-                onSelectListing={(item) => setSelectedListingId(item.id)}
-                onAdvanceGps={handleAdvanceGps}
-                users={users}
-                darkMode={darkMode}
-                onPinCustomLocation={(coords) => {
-                  setCustomPinnedCoords(coords);
-                  setIsDonorModalOpen(true);
-                }}
-                liveMapSyncEnabled={liveMapSyncEnabled}
-                onToggleLiveMapSync={setLiveMapSyncEnabled}
-                forceSyncTrigger={forceSyncTrigger}
-              />
+              {/* Map Mode Switcher: Live Delivery Tracking (React-Leaflet + OSRM) vs All-India Corridor Heatmap */}
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div
+                  className="inline-flex items-center gap-1 p-1 bg-slate-200/70 dark:bg-slate-800 rounded-lg"
+                  role="group"
+                  aria-label="Map Experience Switcher"
+                >
+                  <button
+                    type="button"
+                    onClick={() => setMapViewMode('live-osrm')}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+                      mapViewMode === 'live-osrm'
+                        ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs font-semibold'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                    }`}
+                  >
+                    Live GPS Delivery Map (OSM + OSRM Route)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMapViewMode('corridor')}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+                      mapViewMode === 'corridor'
+                        ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs font-semibold'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                    }`}
+                  >
+                    All-India Corridor &amp; Demand Heatmap
+                  </button>
+                </div>
+                {mapViewMode === 'live-osrm' && selectedListing && (
+                  <span className="text-xs text-slate-500 dark:text-slate-400">
+                    Tracking batch{' '}
+                    <strong className="font-mono-tabular text-slate-800 dark:text-slate-200">
+                      {selectedListing.batchCode}
+                    </strong>{' '}
+                    as{' '}
+                    <strong className="uppercase text-orange-600 dark:text-orange-400">
+                      {currentUser.role}
+                    </strong>
+                  </span>
+                )}
+              </div>
+
+              {mapViewMode === 'live-osrm' && selectedListing ? (
+                <LiveTrackingMap
+                  deliveryId={selectedListing.id}
+                  volunteerId={
+                    selectedListing.assignedVolunteerId || currentUser.id
+                  }
+                  isVolunteer={isAssignedVolunteer}
+                  active={
+                    selectedListing.status === 'CLAIMED' ||
+                    selectedListing.status === 'COLLECTED'
+                  }
+                  currentUserId={currentUser.id}
+                  authToken={idToken}
+                  pickupCoords={selectedListing.pickupCoords}
+                  dropoffCoords={selectedListing.dropoffCoords}
+                  donorOrg={selectedListing.donorOrg}
+                  receiverOrg={selectedListing.claimedByReceiverOrg}
+                  batchCode={selectedListing.batchCode}
+                  pickupOtp={selectedListing.pickupOtp}
+                  dropoffOtp={selectedListing.dropoffOtp}
+                  deliveryStatus={selectedListing.status}
+                  initialLocation={{
+                    latitude: selectedListing.currentLocation.lat,
+                    longitude: selectedListing.currentLocation.lng,
+                    updatedAt: selectedListing.currentLocation.lastGpsUpdatedAt,
+                  }}
+                  wsRef={wsRef}
+                />
+              ) : (
+                <CorridorMap
+                  listings={listings}
+                  selectedListing={selectedListing}
+                  onSelectListing={(item) => setSelectedListingId(item.id)}
+                  onAdvanceGps={handleAdvanceGps}
+                  users={users}
+                  darkMode={darkMode}
+                  onPinCustomLocation={(coords) => {
+                    setCustomPinnedCoords(coords);
+                    setIsDonorModalOpen(true);
+                  }}
+                  liveMapSyncEnabled={liveMapSyncEnabled}
+                  onToggleLiveMapSync={setLiveMapSyncEnabled}
+                  forceSyncTrigger={forceSyncTrigger}
+                />
+              )}
 
               {/* Filter & Search Bar */}
               <div className="flex flex-wrap items-center justify-between gap-4 pt-2">
